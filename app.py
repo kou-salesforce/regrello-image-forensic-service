@@ -24,7 +24,7 @@ def verify():
             return jsonify({"error": f"Download failed: {str(e)}"}), 400
 
     # Run ExifTool to check for Software, SceneType, and MakerNotes
-    cmd = ["exiftool", "-j", "-Software", "-SceneType", "-MakerNotes", path]
+    cmd = ["exiftool", "-j", "-m", "-Software", "-SceneType", "-MakerNotes", path]
     result = subprocess.run(cmd, capture_output=True, text=True)
     
     if os.path.exists(path):
