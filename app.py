@@ -12,7 +12,7 @@ def verify():
     response_data = {
         "trust_score": 0,
         "is_authentic": False,
-        "flags": ["Missing Metadata"],
+        "flags": ["Missing Camera Metadata"],
         "software_detected": "Unknown",
         "camera_model": "Unknown"
     }
@@ -24,11 +24,11 @@ def verify():
         elif 'image' in request.form:
             image_data = json.loads(request.form['image'])[0]
             image_url = image_data.get('signedUrl').replace('\\u0026', '&').replace('+', '%2B').replace(' ', '%20')
-            with urllib.request.urlopen(image_url, timeout=15) as response, open(path, 'wb') as out_file:
+            with urllib.request.urlopen(image_url, timeout=10) as response, open(path, 'wb') as out_file:
                 out_file.write(response.read())
 
         if os.path.exists(path):
-            # Extract 'Photo DNA' (Exposure/Aperture) to verify real iPhone shots
+            # Photo DNA: Proof of physical light capture (Exposure, F-Stop, ISO)
             cmd = ["exiftool", "-j", "-m", "-Software", "-Model", "-MakerNotes", 
                    "-ExposureTime", "-FNumber", "-ISO", path]
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -37,29 +37,27 @@ def verify():
                 metadata = json.loads(result.stdout)[0]
                 software = metadata.get('Software', 'Unknown')
                 model = metadata.get('Model', 'Unknown')
-                
-                # Check for physical camera settings (Photo DNA)
                 has_photo_dna = any(metadata.get(tag) for tag in ['ExposureTime', 'FNumber', 'ISO'])
                 
                 flags = []
                 trust_score = 100
 
-                # 1. Screenshot Check: No Camera Model = 0 Score
+                # Screenshot Detection: If no Camera Model, score is 0
                 if model == "Unknown":
                     trust_score = 0
                     flags.append("Missing Camera Hardware ID (Screenshot detected)")
                 
-                # 2. Editing Software Check
+                # Editing Check
                 if any(x in software.lower() for x in ['adobe', 'photoshop', 'canva']):
                     trust_score -= 60
-                    flags.append(f"Software: {software}")
+                    flags.append(f"Software Fingerprint: {software}")
                 
-                # 3. Hardware Fingerprint (Waived if Photo DNA is found)
+                # Hardware Fingerprint Check
                 if 'MakerNotes' not in metadata and not has_photo_dna:
                     trust_score -= 30
-                    flags.append("Missing hardware signatures")
+                    flags.append("Missing proprietary hardware signatures")
                 elif has_photo_dna:
-                    flags.append("Verified Hardware Metadata (Exposure/Aperture confirmed)")
+                    flags.append("Verified Hardware Metadata (Photo DNA confirmed)")
 
                 response_data.update({
                     "trust_score": max(0, trust_score),
@@ -72,9 +70,10 @@ def verify():
     except Exception as e:
         print(f"Forensic Error: {e}")
 
-    if os.path.exists(path):
-        os.remove(path)
-    return jsonify(response_data)
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+        return jsonify(response_data)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
