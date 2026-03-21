@@ -9,78 +9,75 @@ app = Flask(__name__)
 @app.route('/verify', methods=['POST'])
 def verify():
     path = "forensic_temp.jpg"
-    
-    # 1. Image Download Logic
-    if 'image' in request.files:
-        file = request.files['image']
-        file.save(path)
-    elif 'image' in request.form:
-        try:
-            image_data = json.loads(request.form['image'])[0]
-            image_url = image_data.get('signedUrl')
-            
-            # Fix: Encode spaces and special characters in the URL
-            image_url = image_url.replace('\\u0026', '&').replace('+', '%2B').replace(' ', '%20')
-            
-            with urllib.request.urlopen(image_url) as response, open(path, 'wb') as out_file:
-                out_file.write(response.read())
-        except Exception as e:
-            return jsonify({"error": f"Download failed: {str(e)}"}), 400
-    else:
-        return jsonify({"trust_score": 0, "is_authentic": False, "flags": ["No image found"]}), 400
-
-    # 2. Run ExifTool Forensic Scan
-    # Adding -Model to the scan to differentiate hardware from screenshots
-    cmd = ["exiftool", "-j", "-m", "-Software", "-Model", "-MakerNotes", path]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if os.path.exists(path):
-        os.remove(path)
-    
-    exif_results = json.loads(result.stdout)
-    
-    # Default values for empty/failed scans
-    response = {
+    response_data = {
         "trust_score": 0,
         "is_authentic": False,
-        "flags": ["No forensic metadata found to analyze"],
-        "software_detected": "None",
+        "flags": ["Insufficient metadata for analysis"],
+        "software_detected": "Unknown",
         "camera_model": "Unknown"
     }
 
-    if exif_results and len(exif_results) > 0:
-        metadata = exif_results[0]
-        software = metadata.get('Software', 'Unknown')
-        model = metadata.get('Model', 'Unknown')
-        
-        flags = []
-        trust_score = 100
+    try:
+        # 1. Download Logic with Timeout
+        if 'image' in request.files:
+            file = request.files['image']
+            file.save(path)
+        elif 'image' in request.form:
+            image_data = json.loads(request.form['image'])[0]
+            image_url = image_data.get('signedUrl').replace('\\u0026', '&').replace('+', '%2B').replace(' ', '%20')
+            with urllib.request.urlopen(image_url, timeout=15) as response, open(path, 'wb') as out_file:
+                out_file.write(response.read())
 
-        # PENALTY 1: Editing Software Detected (e.g., Photoshop, Canva)
-        if any(x in software.lower() for x in ['adobe', 'photoshop', 'gimp', 'canva', 'ai']):
-            trust_score -= 60
-            flags.append(f"Software Fingerprint: {software}")
+        # 2. Run Forensic Scan (Including technical camera tags)
+        if os.path.exists(path):
+            # Added Exposure, FNumber, ISO, and Lens to prove it's a real photo
+            cmd = ["exiftool", "-j", "-m", "-Software", "-Model", "-MakerNotes", 
+                   "-ExposureTime", "-FNumber", "-ISO", "-LensModel", path]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.stdout.strip():
+                metadata = json.loads(result.stdout)[0]
+                software = metadata.get('Software', 'Unknown')
+                model = metadata.get('Model', 'Unknown')
+                
+                # Check for "Photo DNA" (Technical camera settings)
+                has_photo_dna = any(metadata.get(tag) for tag in ['ExposureTime', 'FNumber', 'ISO', 'LensModel'])
+                
+                flags = []
+                trust_score = 100
 
-        # PENALTY 2: Missing Camera Model (Screenshots/Graphics have no Model)
-        if model == "Unknown":
-            trust_score -= 40
-            flags.append("Missing Camera Hardware ID (Screenshot or digital export)")
+                # PENALTIES
+                # 1. Editing Software Check
+                if any(x in software.lower() for x in ['adobe', 'photoshop', 'gimp', 'canva', 'ai']):
+                    trust_score -= 60
+                    flags.append(f"Software Fingerprint: {software}")
+                
+                # 2. Hard Fail for Screenshots (No Model = 0 score)
+                if model == "Unknown":
+                    trust_score = 0
+                    flags.append("Missing Camera Hardware ID (Screenshot detected)")
+                
+                # 3. MakerNotes Check (Waived if Photo DNA exists)
+                if 'MakerNotes' not in metadata and not has_photo_dna:
+                    trust_score -= 30
+                    flags.append("Missing proprietary hardware signatures")
+                elif has_photo_dna:
+                    flags.append("Verified Hardware Metadata (Exposure/Aperture confirmed)")
 
-        # PENALTY 3: Missing MakerNotes (The unique hardware "handshake")
-        if 'MakerNotes' not in metadata:
-            trust_score -= 30
-            flags.append("Missing proprietary hardware signatures")
+                response_data.update({
+                    "trust_score": max(0, trust_score),
+                    "is_authentic": trust_score >= 90,
+                    "flags": flags,
+                    "software_detected": software,
+                    "camera_model": model
+                })
 
-        # Threshold set to 90: Only untouched camera photos will pass
-        response.update({
-            "trust_score": max(0, trust_score),
-            "is_authentic": trust_score >= 90,
-            "flags": flags if flags else ["Metadata Verified Original"],
-            "software_detected": software,
-            "camera_model": model
-        })
+    except Exception as e:
+        print(f"Forensic Error: {e}")
 
-    return jsonify(response)
+    if os.path.exists(path):
+        os.remove(path)
+    return jsonify(response_data)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
