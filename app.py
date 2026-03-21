@@ -12,13 +12,12 @@ def verify():
     response_data = {
         "trust_score": 0,
         "is_authentic": False,
-        "flags": ["Insufficient metadata for analysis"],
+        "flags": ["Missing Metadata"],
         "software_detected": "Unknown",
         "camera_model": "Unknown"
     }
 
     try:
-        # 1. Download Logic with Timeout
         if 'image' in request.files:
             file = request.files['image']
             file.save(path)
@@ -28,11 +27,10 @@ def verify():
             with urllib.request.urlopen(image_url, timeout=15) as response, open(path, 'wb') as out_file:
                 out_file.write(response.read())
 
-        # 2. Run Forensic Scan (Including technical camera tags)
         if os.path.exists(path):
-            # Added Exposure, FNumber, ISO, and Lens to prove it's a real photo
+            # Extract 'Photo DNA' (Exposure/Aperture) to verify real iPhone shots
             cmd = ["exiftool", "-j", "-m", "-Software", "-Model", "-MakerNotes", 
-                   "-ExposureTime", "-FNumber", "-ISO", "-LensModel", path]
+                   "-ExposureTime", "-FNumber", "-ISO", path]
             result = subprocess.run(cmd, capture_output=True, text=True)
             
             if result.stdout.strip():
@@ -40,27 +38,26 @@ def verify():
                 software = metadata.get('Software', 'Unknown')
                 model = metadata.get('Model', 'Unknown')
                 
-                # Check for "Photo DNA" (Technical camera settings)
-                has_photo_dna = any(metadata.get(tag) for tag in ['ExposureTime', 'FNumber', 'ISO', 'LensModel'])
+                # Check for physical camera settings (Photo DNA)
+                has_photo_dna = any(metadata.get(tag) for tag in ['ExposureTime', 'FNumber', 'ISO'])
                 
                 flags = []
                 trust_score = 100
 
-                # PENALTIES
-                # 1. Editing Software Check
-                if any(x in software.lower() for x in ['adobe', 'photoshop', 'gimp', 'canva', 'ai']):
-                    trust_score -= 60
-                    flags.append(f"Software Fingerprint: {software}")
-                
-                # 2. Hard Fail for Screenshots (No Model = 0 score)
+                # 1. Screenshot Check: No Camera Model = 0 Score
                 if model == "Unknown":
                     trust_score = 0
                     flags.append("Missing Camera Hardware ID (Screenshot detected)")
                 
-                # 3. MakerNotes Check (Waived if Photo DNA exists)
+                # 2. Editing Software Check
+                if any(x in software.lower() for x in ['adobe', 'photoshop', 'canva']):
+                    trust_score -= 60
+                    flags.append(f"Software: {software}")
+                
+                # 3. Hardware Fingerprint (Waived if Photo DNA is found)
                 if 'MakerNotes' not in metadata and not has_photo_dna:
                     trust_score -= 30
-                    flags.append("Missing proprietary hardware signatures")
+                    flags.append("Missing hardware signatures")
                 elif has_photo_dna:
                     flags.append("Verified Hardware Metadata (Exposure/Aperture confirmed)")
 
