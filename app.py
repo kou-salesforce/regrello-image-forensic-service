@@ -10,54 +10,69 @@ app = Flask(__name__)
 def verify():
     path = "forensic_temp.jpg"
     
-    # Standard image download logic (same as your GPS tool)
+    # 1. Image Download Logic
     if 'image' in request.files:
         file = request.files['image']
         file.save(path)
     elif 'image' in request.form:
         try:
             image_data = json.loads(request.form['image'])[0]
-            image_url = image_data.get('signedUrl').replace('\\u0026', '&').replace('+', '%2B')
+            image_url = image_data.get('signedUrl')
+            
+            # CRITICAL FIX: Encode spaces and special characters in the URL
+            image_url = image_url.replace('\\u0026', '&').replace('+', '%2B').replace(' ', '%20')
+            
             with urllib.request.urlopen(image_url) as response, open(path, 'wb') as out_file:
                 out_file.write(response.read())
         except Exception as e:
             return jsonify({"error": f"Download failed: {str(e)}"}), 400
+    else:
+        return jsonify({"error": "No image data found"}), 400
 
-    # Run ExifTool to check for Software, SceneType, and MakerNotes
-    cmd = ["exiftool", "-j", "-m", "-Software", "-SceneType", "-MakerNotes", path]
+    # 2. Run ExifTool Forensic Scan
+    # '-m' ignores minor formatting errors (essential for iPhone 14)
+    cmd = ["exiftool", "-j", "-m", "-Software", "-SceneType", "-MakerNotes", "-History", path]
     result = subprocess.run(cmd, capture_output=True, text=True)
     
+    # Cleanup temp file immediately
     if os.path.exists(path):
         os.remove(path)
     
+    # 3. Analyze Results
     metadata = json.loads(result.stdout)[0]
     software = metadata.get('Software', 'Unknown')
     scene = metadata.get('SceneType', 'Unknown')
+    history = metadata.get('History', '')
     
-    # Forensic Logic
     flags = []
     trust_score = 100
 
-    # 1. Check for Editing Software (Photoshop, GIMP, etc.)
-    if any(x in software.lower() for x in ['adobe', 'photoshop', 'gimp', 'canva', 'ai']):
+    # FLAG: Editing Software Detected
+    if any(x in software.lower() for x in ['adobe', 'photoshop', 'gimp', 'canva', 'ai', 'midjourney']):
         trust_score -= 50
-        flags.append(f"Edited with: {software}")
+        flags.append(f"Software Fingerprint: {software}")
 
-    # 2. Check Scene Type (Real cameras tag this as 'Directly photographed')
-    if scene != "Directly photographed":
+    # FLAG: Digital Origin (Non-Camera)
+    if scene != "Directly photographed" and scene != "Unknown":
         trust_score -= 30
-        flags.append("Digital creation or non-camera source detected")
+        flags.append(f"Non-camera source detected: {scene}")
 
-    # 3. Check for MakerNotes (Metadata created by physical hardware like iPhone 14)
+    # FLAG: Missing Hardware Signatures (iPhone Fix)
     if 'MakerNotes' not in metadata:
         trust_score -= 20
         flags.append("Missing hardware-specific signatures (MakerNotes)")
 
+    # FLAG: Edit History Found
+    if history:
+        trust_score -= 10
+        flags.append("Internal edit history detected in metadata")
+
     return jsonify({
         "trust_score": max(0, trust_score),
-        "is_authentic": trust_score > 70,
+        "is_authentic": trust_score >= 80,
         "flags": flags,
-        "software": software
+        "software_detected": software,
+        "scene_type": scene
     })
 
 if __name__ == '__main__':
